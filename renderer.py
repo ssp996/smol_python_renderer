@@ -3,6 +3,7 @@ from OpenGL.GL import shaders
 import glfw
 import numpy as np
 from enum import Enum
+import ctypes
 
 class UniformType(Enum):
     # Scalars
@@ -30,6 +31,10 @@ class UniformType(Enum):
     MAT2 = "mat2"
     MAT3 = "mat3"
     MAT4 = "mat4"
+
+    #Light type
+    LIGHT_TYPE_POINT = "point_light"
+    LIGHT_TYPE_DIRECTIONAL = "directional_light"
 
 
 UNIFORM_UPLOADERS = {
@@ -92,8 +97,12 @@ def upload_uniforms(uniform_data, locs):
         uploader = UNIFORM_UPLOADERS[data.type]
         uploader(locs[i], data.data)
 
+def load_shader_source(filepath):
+    with open(filepath, "r") as file:
+        return file.read()
+
 class Object:
-    def __init__(self, vertices, colors, normals, indices, uniform_data):
+    def __init__(self, vertices, colors, normals, indices, model_matrix, uniform_data):
         self.vertex_count = len(vertices)
         self.index_count = len(indices)
 
@@ -112,6 +121,8 @@ class Object:
         self.vbo = None
         self.ebo = None
 
+        self.model_matrix = model_matrix
+
         self.uniform_data = uniform_data
         self.uniform_locs = []
 
@@ -121,24 +132,64 @@ class UniformData:
         self.type = type
         self.name = name
 
+class Light:
+    def __init__(self, pos_dir, color, intensity, type, light_matrices, far_plane=None): #enter far plane for point lights
+        self.pos_dir = pos_dir
+        self.color = color
+        self.intensity = intensity
+        self.type = type
+        self.light_matrices = light_matrices
+        self.far_plane = far_plane
+        self.texture_unit_index = None
+
+        self.fbo = None
+        self.shadow_map = None
+
 class Renderer:
-    def __init__(self, objects: list[Object], uniform_data: list[UniformData]):
+    def __init__(self, objects: list[Object], uniform_data: list[UniformData], lights: list[Light]):
         self.width = 800
         self.height = 800
+
+        self.shadow_width = 2048
+        self.shadow_height = 2048
 
         self.window = None
 
         self.vertex_shader_path = "shaders/vertex_shader.vert"
         self.fragment_shader_path = "shaders/fragment_shader.frag"
 
+        self.camera_pos = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+
         self.objects = objects
         self.global_uniform_data = uniform_data
         self.locs = []
-        self.shader_program = None
+
+        self.directional_lights_program_locs = {}
+        self.point_light_program_locs = {}
+        self.main_shader_program_locs = {}
+
+        self.main_shader_program = None
+        self.directional_lights_program = None
+        self.point_lights_program = None
 
         self.clear_color = (0.1, 0.1, 0.1, 1.0)
 
         self.uniform_uploaders = UNIFORM_UPLOADERS
+
+        self.point_lights: list[Light] = []
+        self.directional_lights:list[Light] = []
+
+        self.max_directional_lights = 2
+        self.max_point_lights = 4
+
+        for light in lights:
+            if light.type == UniformType.LIGHT_TYPE_POINT:
+                self.point_lights.append(light)
+            elif light.type == UniformType.LIGHT_TYPE_DIRECTIONAL:
+                self.directional_lights.append(light)
+
+        if len(self.point_lights) > 4 or len(self.directional_lights) > 2:
+            raise ValueError("maximum lights exceeded")
 
     def init_glfw(self):
         if not glfw.init():
@@ -161,15 +212,19 @@ class Renderer:
         glEnable(GL_DEPTH_TEST)
         
     def compile_shaders(self):
-        with open(self.vertex_shader_path, encoding='utf-8') as f:
-            vertex_shader_source = f.read()
+        vertex_shader = shaders.compileShader(load_shader_source(self.vertex_shader_path), GL_VERTEX_SHADER)
+        fragment_shader = shaders.compileShader(load_shader_source(self.fragment_shader_path), GL_FRAGMENT_SHADER)
+        self.main_shader_program = shaders.compileProgram(vertex_shader, fragment_shader, validate=False)
 
-        with open(self.fragment_shader_path, encoding='utf-8') as f:
-            fragment_shader_source = f.read()
+        directional_lights_vertex_shader = shaders.compileShader(load_shader_source("shaders/lighting_and_shadows/directional_vertex.vert"), GL_VERTEX_SHADER)
+        directional_lights_fragment_shader = shaders.compileShader(load_shader_source("shaders/lighting_and_shadows/directional_fragment.frag"), GL_FRAGMENT_SHADER)
+        self.directional_lights_program = shaders.compileProgram(directional_lights_vertex_shader, directional_lights_fragment_shader)
 
-        vertex_shader = shaders.compileShader(vertex_shader_source, GL_VERTEX_SHADER)
-        fragment_shader = shaders.compileShader(fragment_shader_source, GL_FRAGMENT_SHADER)
-        self.shader_program = shaders.compileProgram(vertex_shader, fragment_shader)
+        point_lights_vertex_shader = shaders.compileShader(load_shader_source("shaders/lighting_and_shadows/point_vertex.vert"), GL_VERTEX_SHADER)
+        point_lights_geometry_shader = shaders.compileShader(load_shader_source("shaders/lighting_and_shadows/point_geometry.geom"), GL_GEOMETRY_SHADER)
+        point_lights_fragment_shader = shaders.compileShader(load_shader_source("shaders/lighting_and_shadows/point_fragment.frag"), GL_FRAGMENT_SHADER)
+        self.point_lights_program = shaders.compileProgram(point_lights_vertex_shader, point_lights_geometry_shader, point_lights_fragment_shader)
+
 
     def create_buffers(self):
         for obj in self.objects:
@@ -202,30 +257,238 @@ class Renderer:
 
             glBindVertexArray(0)
 
+        if self.point_lights:
+            for i, point_light in enumerate(self.point_lights):
+                point_light.fbo = glGenFramebuffers(1)
+                point_light.shadow_map = glGenTextures(1)
+                glBindTexture(GL_TEXTURE_CUBE_MAP, point_light.shadow_map)
+
+                for j in range(6):
+                    glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + j, 0, GL_DEPTH_COMPONENT, self.shadow_width, self.shadow_height, 0, GL_DEPTH_COMPONENT, GL_FLOAT, None)
+
+                glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
+                glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
+                glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+                glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+                glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE)
+
+                glBindFramebuffer(GL_FRAMEBUFFER, point_light.fbo)    
+                glFramebufferTexture(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, point_light.shadow_map, 0)
+                glDrawBuffer(GL_NONE)
+                glReadBuffer(GL_NONE)
+                glBindFramebuffer(GL_FRAMEBUFFER, 0)
+
+        if self.directional_lights:
+            for i, directional_light in enumerate(self.directional_lights):
+                directional_light.fbo = glGenFramebuffers(1)
+                directional_light.shadow_map = glGenTextures(1)
+                glBindTexture(GL_TEXTURE_2D, directional_light.shadow_map)
+
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT, self.shadow_width, self.shadow_height, 0, GL_DEPTH_COMPONENT, GL_FLOAT, None)
+
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER)
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER)
+                borderColor = np.array([1.0, 1.0, 1.0, 1.0], dtype=np.float32)
+                glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, borderColor)
+
+                glBindFramebuffer(GL_FRAMEBUFFER, directional_light.fbo)
+                glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, directional_light.shadow_map, 0)
+                glDrawBuffer(GL_NONE)
+                glReadBuffer(GL_NONE)
+                glBindFramebuffer(GL_FRAMEBUFFER, 0)
+    
+
     def get_locations(self):
+        """ directional light program's locs """
+
+        model_loc = glGetUniformLocation(self.directional_lights_program, "model")
+        self.directional_lights_program_locs["model_loc"] = model_loc
+
+        light_space_matrix_loc = glGetUniformLocation(self.directional_lights_program, "lightSpaceMatrix")
+        self.directional_lights_program_locs["light_space_matrix_loc"] = light_space_matrix_loc
+
+        """point light program's locs"""
+
+        model_loc = glGetUniformLocation(self.point_lights_program, "model")
+        self.point_light_program_locs["model_loc"] = model_loc
+
+        shadow_matrix_locs = []
+
+        for i in range(6):
+            matrix_loc = glGetUniformLocation(self.point_lights_program, f"shadowMatrices[{i}]")
+            shadow_matrix_locs.append(matrix_loc)
+
+        self.point_light_program_locs["shadow_matrix_locs"] = shadow_matrix_locs
+
+        light_pos_loc = glGetUniformLocation(self.point_lights_program, "lightPos")
+        self.point_light_program_locs["light_pos_loc"] = light_pos_loc
+
+        far_plane_loc = glGetUniformLocation(self.point_lights_program, "far_plane")
+        self.point_light_program_locs["far_plane_loc"] = far_plane_loc
+
+        """main shader program locs"""
+
+        #vertex shader uniforms (user defined)
         for data in self.global_uniform_data:
-            loc = glGetUniformLocation(self.shader_program, data.name)
+            loc = glGetUniformLocation(self.main_shader_program, data.name)
             self.locs.append(loc)
 
         for obj in self.objects:
             for data in obj.uniform_data:
-                loc = glGetUniformLocation(self.shader_program, data.name)
+                loc = glGetUniformLocation(self.main_shader_program, data.name)
                 obj.uniform_locs.append(loc)
 
-    def draw_loop(self, model_update=None):
-        while not glfw.window_should_close(self.window):
+        #shadow related
+        self.main_shader_program_locs["active_point_lights_loc"] = glGetUniformLocation(self.main_shader_program, "activePointLights")
+        self.main_shader_program_locs["active_dir_lights_loc"] = glGetUniformLocation(self.main_shader_program, "activeDirLights")
 
-            if model_update:
-                model_update()
+        camera_pos_loc = glGetUniformLocation(self.main_shader_program, "cameraPos")
+        self.main_shader_program_locs["camera_pos_loc"] = camera_pos_loc
 
-            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
-            glUseProgram(self.shader_program)
-            upload_uniforms(self.global_uniform_data, self.locs)
+        #directional light struct data
+        directional_light_locs = []
+        for i, light in enumerate(self.directional_lights):
+            light_locs_dict = {}
+            
+            light_locs_dict["dir_loc"] = glGetUniformLocation(self.main_shader_program, f"dirLights[{i}].direction")
+        
+            light_locs_dict["color_loc"] = glGetUniformLocation(self.main_shader_program, f"dirLights[{i}].color")
+           
+            light_locs_dict["intensity_loc"] = glGetUniformLocation(self.main_shader_program, f"dirLights[{i}].intensity")
+            
+            light_locs_dict["matrix_loc"] = glGetUniformLocation(self.main_shader_program, f"dirLights[{i}].lightSpaceMatrix")
+
+            directional_light_locs.append(light_locs_dict)
+
+        self.main_shader_program_locs["directional_light_locs"] = directional_light_locs
+
+        self.main_shader_program_locs["dir_sampler_locs"] = [glGetUniformLocation(self.main_shader_program, f"dirShadowMaps[{i}]") for i in range(self.max_directional_lights)]
+
+        #point light struct data
+        point_light_locs = []
+
+        for i, light in enumerate(self.point_lights):
+            light_locs_dict = {}
+            
+            light_locs_dict["pos_loc"] = glGetUniformLocation(self.main_shader_program, f"pointLights[{i}].position")
+        
+            light_locs_dict["color_loc"] = glGetUniformLocation(self.main_shader_program, f"pointLights[{i}].color")
+            
+            light_locs_dict["intensity_loc"] = glGetUniformLocation(self.main_shader_program, f"pointLights[{i}].intensity")
+            
+            light_locs_dict["far_plane"] = glGetUniformLocation(self.main_shader_program, f"pointLights[{i}].farPlane")
+
+            point_light_locs.append(light_locs_dict)
+
+        self.main_shader_program_locs["point_light_locs"] = point_light_locs
+
+        self.main_shader_program_locs["point_sampler_locs"] = [glGetUniformLocation(self.main_shader_program, f"pointShadowMaps[{i}]") for i in range(self.max_point_lights)]
+
+
+    def upload_main_shader_uniforms(self):
+        upload_uniforms(self.global_uniform_data, self.locs)
+        self.uniform_uploaders[UniformType.INT](self.main_shader_program_locs["active_point_lights_loc"], len(self.point_lights))
+        self.uniform_uploaders[UniformType.INT](self.main_shader_program_locs["active_dir_lights_loc"], len(self.directional_lights))
+
+        self.uniform_uploaders[UniformType.VEC3](self.main_shader_program_locs["camera_pos_loc"], self.camera_pos) 
+
+        for i, light in enumerate(self.directional_lights):
+            light_locs = self.main_shader_program_locs["directional_light_locs"][i]
+
+            self.uniform_uploaders[UniformType.VEC3](light_locs["dir_loc"], light.pos_dir)
+
+            self.uniform_uploaders[UniformType.VEC3](light_locs["color_loc"], light.color)
+
+            self.uniform_uploaders[UniformType.FLOAT](light_locs["intensity_loc"], light.intensity)
+
+            self.uniform_uploaders[UniformType.MAT4](light_locs["matrix_loc"], light.light_matrices)
+
+        for i, light in enumerate(self.point_lights):
+            light_locs = self.main_shader_program_locs["point_light_locs"][i]
+
+            self.uniform_uploaders[UniformType.VEC3](light_locs["pos_loc"], light.pos_dir)
+
+            self.uniform_uploaders[UniformType.VEC3](light_locs["color_loc"], light.color)
+
+            self.uniform_uploaders[UniformType.FLOAT](light_locs["intensity_loc"], light.intensity)
+
+            self.uniform_uploaders[UniformType.FLOAT](light_locs["far_plane"], light.far_plane)
+
+        for i, loc in enumerate(self.main_shader_program_locs["dir_sampler_locs"]):
+            self.uniform_uploaders[UniformType.INT](loc, i)
+
+        for i, loc in enumerate(self.main_shader_program_locs["point_sampler_locs"]):
+            self.uniform_uploaders[UniformType.INT](loc, self.max_directional_lights + i)
+
+    def execute_directional_lights_program(self):
+        for directional_light in self.directional_lights:
+            glBindFramebuffer(GL_FRAMEBUFFER, directional_light.fbo)
+            glViewport(0, 0, self.shadow_width, self.shadow_height)
+            glClear(GL_DEPTH_BUFFER_BIT)
+            glUseProgram(self.directional_lights_program)
+
+            self.uniform_uploaders[UniformType.MAT4](self.directional_lights_program_locs["light_space_matrix_loc"], directional_light.light_matrices)
 
             for obj in self.objects:
-                upload_uniforms(obj.uniform_data, obj.uniform_locs)
+                self.uniform_uploaders[UniformType.MAT4](self.directional_lights_program_locs["model_loc"], obj.model_matrix)
                 glBindVertexArray(obj.vao)
                 glDrawElements(GL_TRIANGLES, obj.index_count, GL_UNSIGNED_INT, None)
+
+    def execute_point_lights_program(self):
+        for point_light in self.point_lights:
+            glBindFramebuffer(GL_FRAMEBUFFER, point_light.fbo)
+            glViewport(0, 0, self.shadow_width, self.shadow_height)
+            glClear(GL_DEPTH_BUFFER_BIT)
+            glUseProgram(self.point_lights_program)
+
+            self.uniform_uploaders[UniformType.VEC3](self.point_light_program_locs["light_pos_loc"], point_light.pos_dir)
+            self.uniform_uploaders[UniformType.FLOAT](self.point_light_program_locs["far_plane_loc"], point_light.far_plane)
+
+            for i in range(6):
+                self.uniform_uploaders[UniformType.MAT4](self.point_light_program_locs["shadow_matrix_locs"][i], point_light.light_matrices[i])
+
+            for obj in self.objects:
+                self.uniform_uploaders[UniformType.MAT4](self.point_light_program_locs["model_loc"], obj.model_matrix)
+                glBindVertexArray(obj.vao)
+                glDrawElements(GL_TRIANGLES, obj.index_count, GL_UNSIGNED_INT, None)
+
+    def execute_main_shader_program(self):
+        glBindFramebuffer(GL_FRAMEBUFFER, 0)
+        glViewport(0, 0, self.width, self.height)
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+
+        glUseProgram(self.main_shader_program)
+
+        combined_lights = self.directional_lights + self.point_lights
+        for i, light in enumerate(combined_lights):
+            glActiveTexture(GL_TEXTURE0 + i)
+
+            if light.type == UniformType.LIGHT_TYPE_DIRECTIONAL:
+                glBindTexture(GL_TEXTURE_2D, light.shadow_map)
+            elif light.type == UniformType.LIGHT_TYPE_POINT:
+                glBindTexture(GL_TEXTURE_CUBE_MAP, light.shadow_map)
+   
+            light.texture_unit_index = i
+
+        self.upload_main_shader_uniforms()
+        
+        for i, obj in enumerate(self.objects):
+            upload_uniforms(obj.uniform_data, obj.uniform_locs)
+            glBindVertexArray(obj.vao)
+            glDrawElements(GL_TRIANGLES, obj.index_count, GL_UNSIGNED_INT, None)
+
+
+    def draw_loop(self, update_callback=None):
+        while not glfw.window_should_close(self.window):
+
+            if update_callback:
+                update_callback()
+
+            self.execute_directional_lights_program()
+            self.execute_point_lights_program()
+            self.execute_main_shader_program()
 
             glfw.swap_buffers(self.window)
             glfw.poll_events()
@@ -234,12 +497,16 @@ class Renderer:
         for obj in self.objects:
             glDeleteVertexArrays(1, [obj.vao])
             glDeleteBuffers(1, [obj.vbo])
+
+        for light in (self.point_lights + self.directional_lights):
+            glDeleteFramebuffers(1, [light.fbo])
+            glDeleteTextures(1, [light.shadow_map])
         glfw.terminate()
 
-    def run_app(self, model_update=None):
+    def run_app(self, update_callback=None):
         self.init_glfw()
         self.compile_shaders()
         self.get_locations()
         self.create_buffers()
-        self.draw_loop(model_update)
+        self.draw_loop(update_callback)
         self.cleanup()    
