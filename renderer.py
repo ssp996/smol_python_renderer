@@ -1,6 +1,7 @@
 from OpenGL.GL import *
 from OpenGL.GL import shaders
 import glfw
+import zlib
 import numpy as np
 from enum import Enum
 import ctypes
@@ -92,6 +93,19 @@ UNIFORM_UPLOADERS = {
         glUniformMatrix4fv(loc, 1, GL_TRUE, x),
 }
 
+POINT_FACE_NAMES = ["px", "nx", "py", "ny", "pz", "nz"]
+
+POINT_FACE_DISPLAY = [
+    ((1, 0, 0),  (0, 1, 0),  (0, 1)),   # +X
+    ((-1, 0, 0), (0, 1, 0),  (2, 1)),   # -X
+    ((0, 1, 0),  (0, 0, -1), (1, 0)),   # +Y
+    ((0, -1, 0), (0, 0, 1),  (1, 2)),   # -Y
+    ((0, 0, 1),  (0, 1, 0),  (1, 1)),   # +Z
+    ((0, 0, -1), (0, 1, 0),  (3, 1)),   # -Z
+]
+
+
+
 def upload_uniforms(uniform_data, locs):
     for i, data in enumerate(uniform_data):
         uploader = UNIFORM_UPLOADERS[data.type]
@@ -174,6 +188,16 @@ class Renderer:
 
         self.clear_color = (0.1, 0.1, 0.1, 1.0)
 
+        self.show_shadow_debug = False      
+        self.shadow_export_dir = "shadow_maps"   
+        self.debug_cell = 90                
+        self.debug_dir_size = 180          
+        self.debug_dir_scale = 0.5         
+        self.debug_point_scale = 1.0     
+        self.debug_program = None
+        self.debug_vao = None
+        self.debug_locs = {}
+
         self.uniform_uploaders = UNIFORM_UPLOADERS
 
         self.point_lights: list[Light] = []
@@ -208,6 +232,8 @@ class Renderer:
 
         glfw.make_context_current(self.window)
 
+        glfw.set_key_callback(self.window, self.on_key)
+
         glClearColor(*self.clear_color)
         glEnable(GL_DEPTH_TEST)
         
@@ -225,8 +251,15 @@ class Renderer:
         point_lights_fragment_shader = shaders.compileShader(load_shader_source("shaders/lighting_and_shadows/point_fragment.frag"), GL_FRAGMENT_SHADER)
         self.point_lights_program = shaders.compileProgram(point_lights_vertex_shader, point_lights_geometry_shader, point_lights_fragment_shader)
 
+        debug_vertex_shader = shaders.compileShader(load_shader_source("debug/debug_vertex.vert"), GL_VERTEX_SHADER)
+        debug_fragment_shader = shaders.compileShader(load_shader_source("debug/debug_fragment.frag"), GL_FRAGMENT_SHADER)
+
+        self.debug_program = shaders.compileProgram(debug_vertex_shader, debug_fragment_shader, validate=False)
+
 
     def create_buffers(self):
+        self.debug_vao = glGenVertexArrays(1)
+        
         for obj in self.objects:
             obj.vao = glGenVertexArrays(1)
             obj.vbo = glGenBuffers(1)
@@ -386,6 +419,8 @@ class Renderer:
 
         self.main_shader_program_locs["point_sampler_locs"] = [glGetUniformLocation(self.main_shader_program, f"pointShadowMaps[{i}]") for i in range(self.max_point_lights)]
 
+        for name in ("rect", "mode", "faceForward", "faceRight", "faceUp", "scale", "tex2D", "texCube"):
+            self.debug_locs[name] = glGetUniformLocation(self.debug_program, name)
 
     def upload_main_shader_uniforms(self):
         upload_uniforms(self.global_uniform_data, self.locs)
@@ -461,23 +496,91 @@ class Renderer:
 
         glUseProgram(self.main_shader_program)
 
-        combined_lights = self.directional_lights + self.point_lights
-        for i, light in enumerate(combined_lights):
-            glActiveTexture(GL_TEXTURE0 + i)
+        for i, light in enumerate(self.directional_lights):
+            texture_unit = i
 
-            if light.type == UniformType.LIGHT_TYPE_DIRECTIONAL:
-                glBindTexture(GL_TEXTURE_2D, light.shadow_map)
-            elif light.type == UniformType.LIGHT_TYPE_POINT:
-                glBindTexture(GL_TEXTURE_CUBE_MAP, light.shadow_map)
-   
-            light.texture_unit_index = i
+            glActiveTexture(GL_TEXTURE0 + texture_unit)
+            glBindTexture(GL_TEXTURE_2D, light.shadow_map)
 
+            light.texture_unit_index = texture_unit
+
+
+        for i, light in enumerate(self.point_lights):
+            texture_unit = self.max_directional_lights + i
+
+            glActiveTexture(GL_TEXTURE0 + texture_unit)
+            glBindTexture(GL_TEXTURE_CUBE_MAP, light.shadow_map)
+
+            light.texture_unit_index = texture_unit
         self.upload_main_shader_uniforms()
         
         for i, obj in enumerate(self.objects):
             upload_uniforms(obj.uniform_data, obj.uniform_locs)
             glBindVertexArray(obj.vao)
             glDrawElements(GL_TRIANGLES, obj.index_count, GL_UNSIGNED_INT, None)
+
+
+    def on_key(self, window, key, scancode, action, mods):
+        if action != glfw.PRESS:
+            return
+        if key == glfw.KEY_T:
+            self.show_shadow_debug = not self.show_shadow_debug
+
+    def draw_shadow_debug(self):
+        glBindFramebuffer(GL_FRAMEBUFFER, 0)
+        glViewport(0, 0, self.width, self.height)
+        glDisable(GL_DEPTH_TEST)
+        glUseProgram(self.debug_program)
+        glBindVertexArray(self.debug_vao)
+ 
+        L = self.debug_locs
+        glUniform1i(L["tex2D"], 6)
+        glUniform1i(L["texCube"], 7)
+ 
+        margin = 8
+        cursor = {"x": margin, "y": margin, "row_h": 0}
+ 
+        def place(w, h):
+            if cursor["x"] + w > self.width and cursor["x"] > margin:
+                cursor["x"] = margin
+                cursor["y"] += cursor["row_h"] + margin
+                cursor["row_h"] = 0
+            px, py = cursor["x"], cursor["y"]
+            cursor["x"] += w + margin
+            cursor["row_h"] = max(cursor["row_h"], h)
+            return px, py
+ 
+        def quad(px, py, size):
+            glUniform4f(L["rect"],
+                        2.0 * px / self.width - 1.0, 2.0 * py / self.height - 1.0,
+                        2.0 * size / self.width, 2.0 * size / self.height)
+            glDrawArrays(GL_TRIANGLE_STRIP, 0, 4)
+ 
+        for light in self.directional_lights:
+            glUniform1i(L["mode"], 0)
+            glUniform1f(L["scale"], self.debug_dir_scale)
+            glActiveTexture(GL_TEXTURE6)
+            glBindTexture(GL_TEXTURE_2D, light.shadow_map)
+            px, py = place(self.debug_dir_size, self.debug_dir_size)
+            quad(px, py, self.debug_dir_size)
+ 
+        c = self.debug_cell
+        for light in self.point_lights:
+            glUniform1i(L["mode"], 1)
+            glUniform1f(L["scale"], self.debug_point_scale)
+            glActiveTexture(GL_TEXTURE7)
+            glBindTexture(GL_TEXTURE_CUBE_MAP, light.shadow_map)
+            px, py = place(4 * c, 3 * c)
+            for forward, up, (col, row) in POINT_FACE_DISPLAY:
+                f = np.array(forward, dtype=np.float32)
+                u = np.array(up, dtype=np.float32)
+                r = np.cross(f, u)
+                glUniform3f(L["faceForward"], *f)
+                glUniform3f(L["faceRight"], *r)
+                glUniform3f(L["faceUp"], *u)
+                quad(px + col * c, py + (2 - row) * c, c)
+ 
+        glEnable(GL_DEPTH_TEST)
 
 
     def draw_loop(self, update_callback=None):
@@ -489,6 +592,9 @@ class Renderer:
             self.execute_directional_lights_program()
             self.execute_point_lights_program()
             self.execute_main_shader_program()
+
+            if self.show_shadow_debug:
+                self.draw_shadow_debug()
 
             glfw.swap_buffers(self.window)
             glfw.poll_events()
