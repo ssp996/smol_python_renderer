@@ -3,40 +3,12 @@ from OpenGL.GL import shaders
 import glfw
 import zlib
 import numpy as np
+import math
 from enum import Enum
 import ctypes
-
-class UniformType(Enum):
-    # Scalars
-    FLOAT = "float"
-    INT = "int"
-    UINT = "uint"
-    BOOL = "bool"
-
-    # Floating-point vectors
-    VEC2 = "vec2"
-    VEC3 = "vec3"
-    VEC4 = "vec4"
-
-    # Integer vectors
-    IVEC2 = "ivec2"
-    IVEC3 = "ivec3"
-    IVEC4 = "ivec4"
-
-    # Unsigned integer vectors
-    UVEC2 = "uvec2"
-    UVEC3 = "uvec3"
-    UVEC4 = "uvec4"
-
-    # Matrices
-    MAT2 = "mat2"
-    MAT3 = "mat3"
-    MAT4 = "mat4"
-
-    #Light type
-    LIGHT_TYPE_POINT = "point_light"
-    LIGHT_TYPE_DIRECTIONAL = "directional_light"
-
+from matrix_tools import *
+from camera import Camera
+from object_primitives import *
 
 UNIFORM_UPLOADERS = {
     # Scalars
@@ -115,69 +87,36 @@ def load_shader_source(filepath):
     with open(filepath, "r") as file:
         return file.read()
 
-class Object:
-    def __init__(self, vertices, colors, normals, indices, model_matrix, uniform_data):
-        self.vertex_count = len(vertices)
-        self.index_count = len(indices)
-
-        self.vertices = np.asarray(vertices, dtype=np.float32)
-        self.colors = np.asarray(colors, dtype=np.float32)
-        self.normals = np.asarray(normals, dtype=np.float32)
-        self.indices = np.asarray(indices, dtype=np.uint32)
-
-        self.combined = np.empty((self.vertex_count, 9), dtype=np.float32)
-
-        self.combined[:, 0:3] = self.vertices
-        self.combined[:, 3:6] = self.colors
-        self.combined[:, 6:9] = self.normals
-
-        self.vao = None
-        self.vbo = None
-        self.ebo = None
-
-        self.model_matrix = model_matrix
-
-        self.uniform_data = uniform_data
-        self.uniform_locs = []
-
-class UniformData:
-    def __init__(self, data, type, name):
-        self.data = data
-        self.type = type
-        self.name = name
-
-class Light:
-    def __init__(self, pos_dir, color, intensity, type, light_matrices, far_plane=None): #enter far plane for point lights
-        self.pos_dir = pos_dir
-        self.color = color
-        self.intensity = intensity
-        self.type = type
-        self.light_matrices = light_matrices
-        self.far_plane = far_plane
-        self.texture_unit_index = None
-
-        self.fbo = None
-        self.shadow_map = None
 
 class Renderer:
-    def __init__(self, objects: list[Object], uniform_data: list[UniformData], lights: list[Light]):
-        self.width = 800
-        self.height = 800
+    def __init__(self, width, height, objects: list[Object], uniform_data: list[UniformData]=[], lights: list[Light]=[]):
+        self.width = width
+        self.height = height
 
         self.shadow_width = 2048
         self.shadow_height = 2048
 
         self.window = None
 
-        self.vertex_shader_path = "shaders/vertex_shader.vert"
-        self.fragment_shader_path = "shaders/fragment_shader.frag"
-
-        self.camera_pos = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+        self.vertex_shader_path = "shaders/main_vertex.vert"
+        self.fragment_shader_path = "shaders/main_fragment.frag"
 
         self.objects = objects
-        self.global_uniform_data = uniform_data
-        self.locs = []
+        self.lights = lights
 
+        self.global_uniform_data = []
+
+        self.perspective_projection_matrix = UniformData(perspective(math.radians(60), self.width / self.height, 0.1, 100.0), UniformType.MAT4, "projection")
+        if self.perspective_projection_matrix is not None: self.global_uniform_data.append(self.perspective_projection_matrix)
+
+        self.camera = Camera()
+        self.view_uniform = UniformData(self.camera.get_view_matrix(), UniformType.MAT4, "view")
+        self.global_uniform_data.append(self.view_uniform)
+
+        self.camera_pos = self.camera.position
+        self.global_uniform_data.extend(uniform_data)
+        self.locs = []
+        
         self.directional_lights_program_locs = {}
         self.point_light_program_locs = {}
         self.main_shader_program_locs = {}
@@ -202,6 +141,9 @@ class Renderer:
 
         self.point_lights: list[Light] = []
         self.directional_lights:list[Light] = []
+
+        self.sun = sun()
+        self.directional_lights.append(self.sun)
 
         self.max_directional_lights = 2
         self.max_point_lights = 4
@@ -371,7 +313,9 @@ class Renderer:
         for obj in self.objects:
             for data in obj.uniform_data:
                 loc = glGetUniformLocation(self.main_shader_program, data.name)
+                obj_model_loc = glGetUniformLocation(self.main_shader_program, "model")
                 obj.uniform_locs.append(loc)
+                obj.model_loc = obj_model_loc
 
         #shadow related
         self.main_shader_program_locs["active_point_lights_loc"] = glGetUniformLocation(self.main_shader_program, "activePointLights")
@@ -516,6 +460,7 @@ class Renderer:
         
         for i, obj in enumerate(self.objects):
             upload_uniforms(obj.uniform_data, obj.uniform_locs)
+            self.uniform_uploaders[UniformType.MAT4](obj.model_loc, obj.model_matrix)
             glBindVertexArray(obj.vao)
             glDrawElements(GL_TRIANGLES, obj.index_count, GL_UNSIGNED_INT, None)
 
@@ -589,6 +534,11 @@ class Renderer:
             if update_callback:
                 update_callback()
 
+            if self.camera is not None:
+                self.camera.update(self.window)
+                self.view_uniform.data = self.camera.get_view_matrix()
+                self.camera_pos = self.camera.position
+           
             self.execute_directional_lights_program()
             self.execute_point_lights_program()
             self.execute_main_shader_program()
