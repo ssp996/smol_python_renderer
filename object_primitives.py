@@ -42,7 +42,7 @@ class UniformData:
 
 
 class Object:
-    def __init__(self, vertices, colors, normals, indices, model_matrix, uniform_data=None):
+    def __init__(self, vertices, colors, normals, indices, model_matrix, uniform_data=[]):
         self.vertex_count = len(vertices)
         self.index_count = len(indices)
 
@@ -65,6 +65,7 @@ class Object:
         self.model_loc = None
 
         self.uniform_data = uniform_data
+        self.uniform_data.append(UniformData(model_matrix, UniformType.MAT4, "model"))
         self.uniform_locs = []
 
 class Light:
@@ -124,7 +125,7 @@ class Color(Enum):
     BEIGE       = [0.76, 0.70, 0.50]
     CREAM       = [1.0, 0.99, 0.82]
 
-def expand_mesh(mesh):
+""" def expand_mesh(mesh):
     new_vertices = []
     new_normals = []
     new_indices = []
@@ -151,7 +152,23 @@ def expand_mesh(mesh):
 
         new_indices.append(triangle)
 
-    return (np.array(new_vertices, dtype=np.float32), np.array(new_normals, dtype=np.float32), np.array(new_indices, dtype=np.float32).flatten())
+    return (np.array(new_vertices, dtype=np.float32), np.array(new_normals, dtype=np.float32), np.array(new_indices, dtype=np.float32).flatten()) """
+
+def expand_mesh(mesh):
+    v_expanded = mesh.vertices[mesh.faces].reshape(-1, 3)
+    
+    n_expanded = np.repeat(mesh.face_normals, 3, axis=0)
+    
+    combined = np.hstack((v_expanded, n_expanded))
+    
+    unique_combined, new_indices = np.unique(combined, axis=0, return_inverse=True)
+    
+    new_vertices = unique_combined[:, 0:3].astype(np.float32)
+    new_normals = unique_combined[:, 3:6].astype(np.float32)
+    
+    new_indices = new_indices.astype(np.float32)
+    
+    return new_vertices, new_normals, new_indices
 
 def expand_mesh_smooth(mesh: trimesh.Trimesh):
     mesh = mesh.smooth_shaded

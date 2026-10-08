@@ -1,17 +1,19 @@
 import trimesh 
 import numpy as np
 
-def load_as_mesh(filepath):
-    mesh = trimesh.load(filepath, force='mesh')
-
-    vertices = mesh.vertices.astype(np.float32)
-    normals = mesh.vertex_normals.astype(np.float32)
-    indices = mesh.faces.flatten().astype(np.uint32)
+def load_model_as_mesh(file_path, default_color=(0.502, 0.502, 0.502)):
+    mesh = trimesh.load(file_path, force="mesh")
     
-    colors = mesh.visual.vertex_colors[:, :3] / 255.0
-    colors = colors.astype(np.float32)
+    vertices = np.array(mesh.vertices)
+    indices = np.array(mesh.faces)
+    normals = np.array(mesh.vertex_normals)
+    
+    try:
+        colors = np.array(mesh.visual.vertex_colors)
+        if len(colors) != len(vertices):
+            raise ValueError("Color array size mismatch")
+    except (AttributeError, ValueError, TypeError):
+        colors = np.tile(default_color, (len(vertices), 1)).astype(np.uint8)
 
     return vertices, colors, normals, indices
-
-
 
