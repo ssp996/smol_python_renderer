@@ -2,7 +2,7 @@ from matrix_tools import *
 import glfw
 
 class Camera:
-    def __init__(self, position=(0.0, 4.5, 9.0), target=(0.0, 1.0, 0.0)):
+    def __init__(self, position=(0.0, 4.5, 9.0), target=(0.0, 1.0, 0.0), fov=60.0):
         self.position = np.asarray(position, dtype=np.float32)
         self.world_up = np.array([0.0, 1.0, 0.0], dtype=np.float32)
         self.pitch = 0
@@ -10,6 +10,12 @@ class Camera:
 
         self.sens = 0.1
         self.speed = 5.0
+        self.sprint = 2.5
+
+        self.base_fov = fov
+        self.sprint_fov = 90.0
+        self.fov_smoothing = 10.0
+        self.fov = fov
 
         self.window = None
         self.captured = False
@@ -79,8 +85,13 @@ class Camera:
         if down(glfw.KEY_SPACE): move += self.world_up
         if down(glfw.KEY_LEFT_CONTROL): move -= self.world_up
 
-        if np.linalg.norm(move) > 0:
-            speed = self.speed
+        moving = np.linalg.norm(move)
+        sprinting = down(glfw.KEY_W) and down(glfw.KEY_LEFT_SHIFT)
+
+        if moving:
+            speed = self.speed * (self.sprint if sprinting else 1.0)
             self.position += normalize(move) * speed * dt
 
+        target_fov = self.sprint_fov if sprinting else self.base_fov
+        self.fov += (target_fov - self.fov) * (1.0 - math.exp(-self.fov_smoothing * dt))
 

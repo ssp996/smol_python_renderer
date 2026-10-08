@@ -153,34 +153,9 @@ def expand_mesh(mesh):
 
     return (np.array(new_vertices, dtype=np.float32), np.array(new_normals, dtype=np.float32), np.array(new_indices, dtype=np.float32).flatten())
 
-def expand_mesh_smooth(mesh):
-    new_vertices = []
-    new_normals = []
-    new_indices = []
-
-    vertex_map = {}
-
-    for face in mesh.faces:
-        triangle = []
-
-        for vertex_idx in face:
-            position = mesh.vertices[vertex_idx]
-            normal = mesh.vertex_normals[vertex_idx]
-
-            key = (tuple(position), tuple(normal))
-
-            if key not in vertex_map:
-                vertex_map[key] = len(new_vertices)
-                new_vertices.append(position)
-                new_normals.append(normal)
-
-            triangle.append(vertex_map[key])
-
-        new_indices.extend(triangle)
-
-    return (np.array(new_vertices), np.array(new_normals), np.array(new_indices))
-
-
+def expand_mesh_smooth(mesh: trimesh.Trimesh):
+    mesh = mesh.smooth_shaded
+    return (np.asarray(mesh.vertices, np.float32), np.asarray(mesh.vertex_normals, np.float32), np.asarray(mesh.faces, np.uint32).ravel())
 
 
 def cube_object(color, model_matrix=None, extents=[1, 1, 1]):
@@ -192,7 +167,7 @@ def cube_object(color, model_matrix=None, extents=[1, 1, 1]):
     cube = Object(vertices=BOX_VERTICES, colors=box_colors, normals=BOX_NORMALS, indices=BOX_INDICES, model_matrix=cube_model_matrix, uniform_data=[UniformData(cube_model_matrix, UniformType.MAT4, "model")])
     return cube
 
-def cone_object(color: Color, model_matrix=None, radius=1.0, height=2.0, sections=32, shade_smooth=True):
+def cone_object(color: Color, model_matrix=None, radius=1.0, height=2.0, sections=32, shade_smooth=False):
     trimesh_cone = trimesh.creation.cone(radius=radius, height=height, sections=sections)
     cone_vertices, cone_normals, cone_indices = expand_mesh_smooth(mesh=trimesh_cone) if shade_smooth else expand_mesh(mesh=trimesh_cone)
     colors = np.tile(np.array(color.value, dtype=np.float32), (len(cone_vertices), 1))
@@ -201,9 +176,39 @@ def cone_object(color: Color, model_matrix=None, radius=1.0, height=2.0, section
     cone = Object(vertices=cone_vertices, colors=colors, normals=cone_normals, indices=cone_indices, model_matrix=cone_model_matrix, uniform_data=[UniformData(cone_model_matrix, UniformType.MAT4, "model")])    
     return cone
 
+def cylinder_object(color: Color, model_matrix=None, radius=1.0, height=2.0, sections=32, shade_smooth=False):
+    trimesh_cylinder = trimesh.creation.cylinder(radius=radius, height=height, sections=sections)
+    vertices, normals, indices = expand_mesh_smooth(mesh=trimesh_cylinder) if shade_smooth else expand_mesh(mesh=trimesh_cylinder)
+    colors = np.tile(np.array(color.value, dtype=np.float32), (len(vertices), 1))
+
+    cylinder_model_matrix = model_matrix if model_matrix is not None else np.eye(4, dtype=np.float32)
+    return Object(vertices=vertices, colors=colors, normals=normals, indices=indices, model_matrix=cylinder_model_matrix, uniform_data=[UniformData(cylinder_model_matrix, UniformType.MAT4, "model")])
+
+def icosphere_object(color: Color, model_matrix=None, radius=1.0, subdivisions=3, shade_smooth=True):
+    trimesh_sphere = trimesh.creation.icosphere(subdivisions=subdivisions, radius=radius)
+    vertices, normals, indices = expand_mesh_smooth(mesh=trimesh_sphere) if shade_smooth else expand_mesh(mesh=trimesh_sphere)
+    colors = np.tile(np.array(color.value, dtype=np.float32), (len(vertices), 1))
+
+    sphere_model_matrix = model_matrix if model_matrix is not None else np.eye(4, dtype=np.float32)
+    return Object(vertices=vertices, colors=colors, normals=normals, indices=indices, model_matrix=sphere_model_matrix, uniform_data=[UniformData(sphere_model_matrix, UniformType.MAT4, "model")])
+
+def uv_sphere_object(color: Color, model_matrix=None, radius=1.0, count=(32, 32), shade_smooth=True):
+    trimesh_sphere = trimesh.creation.uv_sphere(radius=radius, count=count)
+    vertices, normals, indices = expand_mesh_smooth(mesh=trimesh_sphere) if shade_smooth else expand_mesh(mesh=trimesh_sphere)
+    colors = np.tile(np.array(color.value, dtype=np.float32), (len(vertices), 1))
+
+    sphere_model_matrix = model_matrix if model_matrix is not None else np.eye(4, dtype=np.float32)
+    return Object(vertices=vertices, colors=colors, normals=normals, indices=indices, model_matrix=sphere_model_matrix, uniform_data=[UniformData(sphere_model_matrix, UniformType.MAT4, "model")])
+
+def capsule_object(color: Color, model_matrix=None, height=2.0, radius=1.0, count=(32, 32), shade_smooth=True):
+    trimesh_capsule = trimesh.creation.capsule(height=height, radius=radius, count=count)
+    vertices, normals, indices = expand_mesh_smooth(mesh=trimesh_capsule) if shade_smooth else expand_mesh(mesh=trimesh_capsule)
+    colors = np.tile(np.array(color.value, dtype=np.float32), (len(vertices), 1))
+
+    capsule_model_matrix = model_matrix if model_matrix is not None else np.eye(4, dtype=np.float32)
+    return Object(vertices=vertices, colors=colors, normals=normals, indices=indices, model_matrix=capsule_model_matrix, uniform_data=[UniformData(capsule_model_matrix, UniformType.MAT4, "model")])
+
 def sun(direction=None, color=None, intensity=0.4):
     direction = np.array([-0.4, -1.0, -0.3] if direction is None else direction, dtype=np.float32)
     color = np.array([0.9, 0.9, 1.0] if color is None else color, dtype=np.float32)
     return Light(pos_dir=direction, color=color, intensity=intensity, type=UniformType.LIGHT_TYPE_DIRECTIONAL, light_matrices=directional_light_matrix(direction))
-
-

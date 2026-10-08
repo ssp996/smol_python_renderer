@@ -89,7 +89,7 @@ def load_shader_source(filepath):
 
 
 class Renderer:
-    def __init__(self, width, height, objects: list[Object], uniform_data: list[UniformData]=[], lights: list[Light]=[]):
+    def __init__(self, width, height, objects: list[Object], uniform_data: list[UniformData]=[], lights: list[Light]=[], default_sun=True):
         self.width = width
         self.height = height
 
@@ -142,8 +142,8 @@ class Renderer:
         self.point_lights: list[Light] = []
         self.directional_lights:list[Light] = []
 
-        self.sun = sun()
-        self.directional_lights.append(self.sun)
+        if (default_sun):
+            self.directional_lights.append(sun())
 
         self.max_directional_lights = 2
         self.max_point_lights = 4
@@ -536,8 +536,11 @@ class Renderer:
 
             if self.camera is not None:
                 self.camera.update(self.window)
+                self.perspective_projection_matrix.data = perspective(math.radians(self.camera.fov), self.width / self.height, 0.1, 100)
                 self.view_uniform.data = self.camera.get_view_matrix()
                 self.camera_pos = self.camera.position
+
+
            
             self.execute_directional_lights_program()
             self.execute_point_lights_program()
