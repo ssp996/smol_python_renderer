@@ -1,5 +1,5 @@
 import trimesh
-from matrix_tools import directional_light_matrix
+from matrix_tools import directional_light_matrix, point_light_matrices
 import numpy as np
 from enum import Enum
 
@@ -229,3 +229,10 @@ def sun(direction=None, color=None, intensity=0.4):
     direction = np.array([-0.4, -1.0, -0.3] if direction is None else direction, dtype=np.float32)
     color = np.array([0.9, 0.9, 1.0] if color is None else color, dtype=np.float32)
     return Light(pos_dir=direction, color=color, intensity=intensity, type=UniformType.LIGHT_TYPE_DIRECTIONAL, light_matrices=directional_light_matrix(direction))
+
+def bulb(position, color=None, intensity=2.0):
+    POINT_FAR = 30.0
+    bulb_color = color if color is not None else Color.ORANGE.value
+    bulb_pos = np.array(position, dtype=np.float32)
+    lightbulb = Light(pos_dir=bulb_pos, color=np.array(bulb_color, dtype=np.float32), intensity=intensity, type=UniformType.LIGHT_TYPE_POINT, light_matrices=point_light_matrices(bulb_pos, POINT_FAR), far_plane=POINT_FAR)
+    return lightbulb
