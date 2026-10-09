@@ -81,6 +81,13 @@ class Light:
         self.fbo = None
         self.shadow_map = None
 
+    def update_pos_dir(self, pos):
+        self.pos_dir = pos
+        if self.far_plane is not None:
+            self.light_matrices = point_light_matrices(pos, self.far_plane)
+        else:
+            self.light_matrices = directional_light_matrix(pos)
+
 
 class Color(Enum):
     BLACK       = [0.0, 0.0, 0.0]

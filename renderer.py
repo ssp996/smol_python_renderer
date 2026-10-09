@@ -125,7 +125,7 @@ class Renderer:
         self.directional_lights_program = None
         self.point_lights_program = None
 
-        self.clear_color = (0.1, 0.1, 0.1, 1.0)
+        self.clear_color = (0.0, 0.0, 0.0, 1.0)
 
         self.show_shadow_debug = False      
         self.shadow_export_dir = "shadow_maps"   
